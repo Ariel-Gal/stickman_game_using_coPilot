@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stickman Hook - Swing to Victory!</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            overflow: hidden;
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        #gameCanvas {
+            display: block;
+            background: linear-gradient(180deg, #87CEEB 0%, #E0F6FF 100%);
+            cursor: pointer;
+        }
+
+        .ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .ui-overlay.active {
+            pointer-events: all;
+        }
+
+        .ui-overlay h1 {
+            font-size: 4em;
+            margin-bottom: 20px;
+            text-shadow: 3px 3px 6px rgba(0, 0, 0, 0.5);
+        }
+
+        .ui-overlay button {
+            font-size: 1.5em;
+            padding: 15px 40px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            pointer-events: all;
+            transition: transform 0.2s;
+        }
+
+        .ui-overlay button:hover {
+            transform: scale(1.1);
+            background: #45a049;
+        }
+
+        #levelDisplay {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 2em;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            font-weight: bold;
+            z-index: 5;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="levelDisplay" class="hidden">Level 1</div>
+    
+    <div id="startScreen" class="ui-overlay active">
+        <h1>🎮 Stickman Hook</h1>
+        <p style="font-size: 1.5em; margin-bottom: 30px;">Swing, Jump, and Hook your way to Victory!</p>
+        <button onclick="startGame()">Start Game</button>
+    </div>
+
+    <div id="levelCompleteScreen" class="ui-overlay hidden">
+        <h1>🎉 Level Complete!</h1>
+        <button onclick="nextLevel()">Next Level</button>
+    </div>
+
+    <div id="victoryScreen" class="ui-overlay hidden">
+        <h1>🏆 Victory!</h1>
+        <p style="font-size: 1.5em; margin-bottom: 30px;">You've completed all levels!</p>
+        <button onclick="restartGame()">Play Again</button>
+    </div>
+
+    <script>
+        // ==================== SETUP ====================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // ==================== GAME STATE ====================
+        let gameState = 'START'; // START, PLAYING, LEVEL_COMPLETE, VICTORY
+        let currentLevelIndex = 0;
+        let lastTime = 0;
+
+        // ==================== CAMERA ====================
+        class Camera {
+            constructor() {
+                this.x = 0;
+                this.y = 0;
+                this.targetX = 0;
+                this.targetY = 0;
+                this.smoothness = 0.1;
+            }
+
+            update(player) {
+                // Center camera on player with offset to show more ahead
+                this.targetX = player.x - canvas.width / 3;
+                this.targetY = player.y - canvas.height / 2;
+
+                // Smooth camera movement
+                this.x += (this.targetX - this.x) * this.smoothness;
+                this.y += (this.targetY - this.y) * this.smoothness;
+
+                // Keep camera from going too far left or below ground
+                this.x = Math.max(0, this.x);
+            }
+
+            apply(ctx) {
+                ctx.save();
+                ctx.translate(-this.x, -this.y);
+            }
+
+            restore(ctx) {
+                ctx.restore();
+            }
+
+            worldToScreen(x, y) {
+                return { x: x - this.x, y: y - this.y };
+            }
+
+            screenToWorld(x, y) {
+                return { x: x + this.x, y: y + this.y };
+            }
+
+            isVisible(x, y, margin = 200) {
+                return x > this.x - margin && 
+                       x < this.x + canvas.width + margin &&
+                       y > this.y - margin && 
+                       y < this.y + canvas.height + margin;
+            }
+        }
+
+        const camera = new Camera();
+
+        // ==================== PHYSICS ====================
+        const GRAVITY = 0.5;
+        const AIR_DRAG = 0.99;
+        const SWING_DAMPING = 0.995;
+
+        class Player {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.radius = 15;
+                this.state = 'FLYING'; // FLYING or SWINGING
+                this.hook = null;
+                this.angle = 0;
+                this.angularVelocity = 0;
+                this.ropeLength = 0;
+                this.limbPhase = 0;
+            }
+
+            attachToHook(hook) {
+                if (this.state === 'SWINGING') return;
+                
+                this.hook = hook;
+                this.state = 'SWINGING';
+                
+                // Calculate initial angle and rope length
+                const dx = this.x - hook.x;
+                const dy = this.y - hook.y;
+                this.ropeLength = Math.sqrt(dx * dx + dy * dy);
+                this.angle = Math.atan2(dy, dx);
+                
+                // Convert linear velocity to angular velocity
+                const tangentVx = -this.vy;
+                const tangentVy = this.vx;
+                const tangentSpeed = Math.sqrt(tangentVx * tangentVx + tangentVy * tangentVy);
+                const angleDiff = Math.atan2(tangentVy, tangentVx) - (this.angle + Math.PI / 2);
+                this.angularVelocity = (tangentSpeed / this.ropeLength) * Math.sign(Math.cos(angleDiff));
+            }
+
+            detach() {
+                if (this.state === 'FLYING') return;
+                
+                this.state = 'FLYING';
+                
+                // Convert angular velocity back to linear velocity
+                this.vx = -this.angularVelocity * this.ropeLength * Math.sin(this.angle);
+                this.vy = this.angularVelocity * this.ropeLength * Math.cos(this.angle);
+                
+                this.hook = null;
+            }
+
+            update(deltaTime) {
+                const dt = Math.min(deltaTime / 16, 2); // Normalize to 60fps, cap for lag spikes
+
+                this.limbPhase += 0.1 * dt;
+
+                if (this.state === 'FLYING') {
+                    // Apply gravity
+                    this.vy += GRAVITY * dt;
+                    
+                    // Apply air drag
+                    this.vx *= Math.pow(AIR_DRAG, dt);
+                    this.vy *= Math.pow(AIR_DRAG, dt);
+                    
+                    // Update position
+                    this.x += this.vx * dt;
+                    this.y += this.vy * dt;
+                } else if (this.state === 'SWINGING') {
+                    // Pendulum physics
+                    const angularAcceleration = (GRAVITY / this.ropeLength) * Math.sin(this.angle);
+                    this.angularVelocity += angularAcceleration * dt;
+                    this.angularVelocity *= Math.pow(SWING_DAMPING, dt);
+                    this.angle += this.angularVelocity * dt;
+                    
+                    // Update position based on rope
+                    this.x = this.hook.x + this.ropeLength * Math.cos(this.angle);
+                    this.y = this.hook.y + this.ropeLength * Math.sin(this.angle);
+                }
+            }
+
+            draw(ctx) {
+                const headRadius = this.radius;
+                const bodyLength = headRadius * 2;
+                
+                // Calculate limb sway based on velocity
+                const velocityMag = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+                const limbSway = Math.sin(this.limbPhase) * Math.min(velocityMag * 0.3, 20);
+                
+                // Body
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                
+                // Head
+                ctx.fillStyle = '#FFD700';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, headRadius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                
+                // Eyes
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.arc(this.x - 5, this.y - 3, 2, 0, Math.PI * 2);
+                ctx.arc(this.x + 5, this.y - 3, 2, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Smile
+                ctx.beginPath();
+                ctx.arc(this.x, this.y + 2, 6, 0, Math.PI);
+                ctx.stroke();
+                
+                // Body
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y + headRadius);
+                ctx.lineTo(this.x, this.y + headRadius + bodyLength);
+                ctx.stroke();
+                
+                // Arms
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y + headRadius + bodyLength * 0.3);
+                ctx.lineTo(this.x - headRadius - limbSway, this.y + headRadius + bodyLength * 0.6);
+                ctx.moveTo(this.x, this.y + headRadius + bodyLength * 0.3);
+                ctx.lineTo(this.x + headRadius + limbSway, this.y + headRadius + bodyLength * 0.6);
+                ctx.stroke();
+                
+                // Legs
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y + headRadius + bodyLength);
+                ctx.lineTo(this.x - headRadius - limbSway * 0.5, this.y + headRadius + bodyLength * 1.8);
+                ctx.moveTo(this.x, this.y + headRadius + bodyLength);
+                ctx.lineTo(this.x + headRadius + limbSway * 0.5, this.y + headRadius + bodyLength * 1.8);
+                ctx.stroke();
+            }
+
+            drawRope(ctx) {
+                if (this.state === 'SWINGING' && this.hook) {
+                    ctx.strokeStyle = '#654321';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(this.hook.x, this.hook.y);
+                    ctx.lineTo(this.x, this.y);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        class Hook {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.radius = 10;
+            }
+
+            draw(ctx) {
+                // Hook post
+                ctx.fillStyle = '#8B4513';
+                ctx.fillRect(this.x - 3, this.y, 6, 30);
+                
+                // Hook circle
+                ctx.fillStyle = '#C0C0C0';
+                ctx.strokeStyle = '#666';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                
+                // Shine effect
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.beginPath();
+                ctx.arc(this.x - 3, this.y - 3, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            distanceTo(x, y) {
+                const dx = this.x - x;
+                const dy = this.y - y;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+        }
+
+        class Trampoline {
+            constructor(x, y, width = 100) {
+                this.x = x;
+                this.y = y;
+                this.width = width;
+                this.height = 20;
+                this.bounceForce = 15;
+                this.compression = 0;
+            }
+
+            checkCollision(player) {
+                if (player.y + player.radius > this.y &&
+                    player.y + player.radius < this.y + this.height &&
+                    player.x > this.x &&
+                    player.x < this.x + this.width &&
+                    player.vy > 0) {
+                    
+                    player.vy = -this.bounceForce;
+                    this.compression = 1;
+                    return true;
+                }
+                return false;
+            }
+
+            update() {
+                this.compression *= 0.8;
+            }
+
+            draw(ctx) {
+                const compressionOffset = this.compression * 5;
+                
+                // Base
+                ctx.fillStyle = '#333';
+                ctx.fillRect(this.x, this.y + 15, this.width, 5);
+                
+                // Springs
+                ctx.strokeStyle = '#666';
+                ctx.lineWidth = 3;
+                for (let i = 0; i < 5; i++) {
+                    const springX = this.x + (this.width / 6) * (i + 1);
+                    ctx.beginPath();
+                    ctx.moveTo(springX, this.y + 15);
+                    ctx.lineTo(springX, this.y + compressionOffset);
+                    ctx.stroke();
+                }
+                
+                // Platform
+                ctx.fillStyle = '#FF4444';
+                ctx.strokeStyle = '#CC0000';
+                ctx.lineWidth = 2;
+                ctx.fillRect(this.x, this.y + compressionOffset, this.width, 10);
+                ctx.strokeRect(this.x, this.y + compressionOffset, this.width, 10);
+                
+                // Stripes
+                ctx.fillStyle = '#FFF';
+                for (let i = 0; i < this.width; i += 20) {
+                    ctx.fillRect(this.x + i, this.y + compressionOffset, 10, 10);
+                }
+            }
+        }
+
+        class FinishLine {
+            constructor(x, levelWidth) {
+                this.x = x;
+                this.y = 0;
+                this.width = 50;
+                this.height = levelWidth; // Full height of the level
+            }
+
+            checkCollision(player) {
+                return player.x + player.radius > this.x && 
+                       player.x - player.radius < this.x + this.width;
+            }
+
+            draw(ctx) {
+                const checkSize = 30;
+                for (let y = 0; y < this.height; y += checkSize) {
+                    for (let x = 0; x < this.width; x += checkSize) {
+                        ctx.fillStyle = ((x / checkSize) + (y / checkSize)) % 2 === 0 ? '#000' : '#FFF';
+                        ctx.fillRect(this.x + x, this.y + y, checkSize, checkSize);
+                    }
+                }
+                
+                // Flag on top
+                ctx.fillStyle = '#FFD700';
+                ctx.beginPath();
+                ctx.moveTo(this.x + this.width / 2, this.y - 50);
+                ctx.lineTo(this.x + this.width / 2 + 40, this.y - 35);
+                ctx.lineTo(this.x + this.width / 2, this.y - 20);
+                ctx.closePath();
+                ctx.fill();
+                
+                // Pole
+                ctx.strokeStyle = '#8B4513';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(this.x + this.width / 2, this.y - 50);
+                ctx.lineTo(this.x + this.width / 2, this.y + 50);
+                ctx.stroke();
+            }
+        }
+
+        // ==================== LEVEL MANAGER ====================
+        class Level {
+            constructor(name, width, height, playerStart, hooks, trampolines = [], finishX) {
+                this.name = name;
+                this.width = width;
+                this.height = height;
+                this.playerStart = playerStart;
+                this.hooks = hooks.map(h => new Hook(h.x, h.y));
+                this.trampolines = trampolines.map(t => new Trampoline(t.x, t.y, t.width));
+                this.finishLine = new FinishLine(finishX, height);
+            }
+
+            drawBackground(ctx, camera) {
+                // Sky gradient
+                const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+                gradient.addColorStop(0, '#87CEEB');
+                gradient.addColorStop(1, '#E0F6FF');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(camera.x, camera.y, canvas.width, canvas.height);
+                
+                // Simple grid for depth perception
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                ctx.lineWidth = 1;
+                
+                const gridSize = 100;
+                const startX = Math.floor(camera.x / gridSize) * gridSize;
+                const startY = Math.floor(camera.y / gridSize) * gridSize;
+                const endX = camera.x + canvas.width;
+                const endY = camera.y + canvas.height;
+                
+                for (let x = startX; x < endX; x += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, camera.y);
+                    ctx.lineTo(x, camera.y + canvas.height);
+                    ctx.stroke();
+                }
+                
+                for (let y = startY; y < endY; y += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(camera.x, y);
+                    ctx.lineTo(camera.x + canvas.width, y);
+                    ctx.stroke();
+                }
+                
+                // Ground
+                ctx.fillStyle = '#8B7355';
+                ctx.fillRect(camera.x, this.height - 50, canvas.width, 50);
+                ctx.fillStyle = '#228B22';
+                ctx.fillRect(camera.x, this.height - 60, canvas.width, 10);
+            }
+        }
+
+        class LevelManager {
+            constructor() {
+                this.levels = [
+                    // Level 1: Tutorial - Simple hooks in a row
+                    new Level(
+                        'Tutorial',
+                        2000,
+                        1000,
+                        { x: 100, y: 700 },
+                        [
+                            { x: 400, y: 400 },
+                            { x: 700, y: 350 },
+                            { x: 1000, y: 400 }
+                        ],
+                        [],
+                        1800
+                    ),
+                    
+                    // Level 2: Swing High - Hooks placed higher, requires momentum
+                    new Level(
+                        'Swing High',
+                        3000,
+                        1200,
+                        { x: 100, y: 900 },
+                        [
+                            { x: 400, y: 600 },
+                            { x: 700, y: 300 },
+                            { x: 1000, y: 250 },
+                            { x: 1400, y: 400 },
+                            { x: 1800, y: 500 }
+                        ],
+                        [],
+                        2800
+                    ),
+                    
+                    // Level 3: The Gap - Large gap with trampoline safety
+                    new Level(
+                        'The Gap',
+                        3500,
+                        1200,
+                        { x: 100, y: 900 },
+                        [
+                            { x: 400, y: 500 },
+                            { x: 700, y: 450 },
+                            { x: 1400, y: 400 }, // Large gap here!
+                            { x: 2000, y: 500 },
+                            { x: 2400, y: 450 }
+                        ],
+                        [
+                            { x: 900, y: 1050, width: 150 },
+                            { x: 1600, y: 1050, width: 150 }
+                        ],
+                        3300
+                    )
+                ];
+            }
+
+            getLevel(index) {
+                return this.levels[index];
+            }
+
+            getTotalLevels() {
+                return this.levels.length;
+            }
+        }
+
+        const levelManager = new LevelManager();
+        let currentLevel = null;
+        let player = null;
+
+        // ==================== INPUT ====================
+        let isMouseDown = false;
+
+        function handleInputStart(e) {
+            if (gameState !== 'PLAYING') return;
+            
+            e.preventDefault();
+            isMouseDown = true;
+            
+            // Find nearest visible hook
+            let nearestHook = null;
+            let minDistance = Infinity;
+            
+            for (const hook of currentLevel.hooks) {
+                if (camera.isVisible(hook.x, hook.y)) {
+                    const distance = hook.distanceTo(player.x, player.y);
+                    if (distance < minDistance && distance < 500) { // Max hook range
+                        minDistance = distance;
+                        nearestHook = hook;
+                    }
+                }
+            }
+            
+            if (nearestHook) {
+                player.attachToHook(nearestHook);
+            }
+        }
+
+        function handleInputEnd(e) {
+            if (gameState !== 'PLAYING') return;
+            
+            e.preventDefault();
+            isMouseDown = false;
+            player.detach();
+        }
+
+        canvas.addEventListener('mousedown', handleInputStart);
+        canvas.addEventListener('mouseup', handleInputEnd);
+        canvas.addEventListener('touchstart', handleInputStart);
+        canvas.addEventListener('touchend', handleInputEnd);
+
+        // ==================== GAME FUNCTIONS ====================
+        function loadLevel(levelIndex) {
+            currentLevelIndex = levelIndex;
+            currentLevel = levelManager.getLevel(levelIndex);
+            
+            player = new Player(
+                currentLevel.playerStart.x,
+                currentLevel.playerStart.y
+            );
+            
+            camera.x = 0;
+            camera.y = 0;
+            
+            document.getElementById('levelDisplay').textContent = `Level ${levelIndex + 1}: ${currentLevel.name}`;
+        }
+
+        function startGame() {
+            document.getElementById('startScreen').classList.remove('active');
+            document.getElementById('startScreen').classList.add('hidden');
+            document.getElementById('levelDisplay').classList.remove('hidden');
+            
+            gameState = 'PLAYING';
+            loadLevel(0);
+            requestAnimationFrame(gameLoop);
+        }
+
+        function nextLevel() {
+            document.getElementById('levelCompleteScreen').classList.add('hidden');
+            
+            currentLevelIndex++;
+            if (currentLevelIndex >= levelManager.getTotalLevels()) {
+                gameState = 'VICTORY';
+                document.getElementById('victoryScreen').classList.remove('hidden');
+                document.getElementById('victoryScreen').classList.add('active');
+            } else {
+                gameState = 'PLAYING';
+                loadLevel(currentLevelIndex);
+            }
+        }
+
+        function restartGame() {
+            document.getElementById('victoryScreen').classList.remove('active');
+            document.getElementById('victoryScreen').classList.add('hidden');
+            
+            gameState = 'PLAYING';
+            loadLevel(0);
+        }
+
+        // ==================== GAME LOOP ====================
+        function update(deltaTime) {
+            if (gameState !== 'PLAYING') return;
+            
+            player.update(deltaTime);
+            camera.update(player);
+            
+            // Update trampolines
+            for (const trampoline of currentLevel.trampolines) {
+                trampoline.update();
+                trampoline.checkCollision(player);
+            }
+            
+            // Check death condition
+            if (player.y > currentLevel.height) {
+                loadLevel(currentLevelIndex); // Reset level
+            }
+            
+            // Check win condition
+            if (currentLevel.finishLine.checkCollision(player)) {
+                gameState = 'LEVEL_COMPLETE';
+                document.getElementById('levelCompleteScreen').classList.remove('hidden');
+                document.getElementById('levelCompleteScreen').classList.add('active');
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            camera.apply(ctx);
+            
+            // Draw background
+            if (currentLevel) {
+                currentLevel.drawBackground(ctx, camera);
+            }
+            
+            // Draw game objects
+            if (currentLevel && player) {
+                // Draw hooks
+                for (const hook of currentLevel.hooks) {
+                    if (camera.isVisible(hook.x, hook.y)) {
+                        hook.draw(ctx);
+                    }
+                }
+                
+                // Draw trampolines
+                for (const trampoline of currentLevel.trampolines) {
+                    if (camera.isVisible(trampoline.x, trampoline.y)) {
+                        trampoline.draw(ctx);
+                    }
+                }
+                
+                // Draw finish line
+                if (camera.isVisible(currentLevel.finishLine.x, 0)) {
+                    currentLevel.finishLine.draw(ctx);
+                }
+                
+                // Draw rope
+                player.drawRope(ctx);
+                
+                // Draw player
+                player.draw(ctx);
+            }
+            
+            camera.restore(ctx);
+        }
+
+        function gameLoop(currentTime) {
+            const deltaTime = currentTime - lastTime;
+            lastTime = currentTime;
+            
+            update(deltaTime);
+            draw();
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ==================== UTILITY ====================
+        console.log('🎮 Stickman Hook Game Loaded!');
+        console.log('Controls: Click/Tap to hook, Release to let go');
+        console.log('Swing through all levels to win!');
+    </script>
+</body>
+</html>
